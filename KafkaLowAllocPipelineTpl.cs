@@ -8,7 +8,7 @@ namespace LowAllocPipeline;
 
 
 // ---------------------------------------------------------------------------
-// 1b. Typed domain model + validation, sitting between raw bytes and
+// Typed domain model + validation, sitting between raw bytes and
 //     business logic. Two deliberate choices here:
 //
 //     - The type is a mutable, pooled CLASS, not a fresh record per message.
@@ -28,7 +28,7 @@ namespace LowAllocPipeline;
 
 
 // ---------------------------------------------------------------------------
-// 3. The pipeline itself, expressed as a TPL Dataflow block graph:
+// The pipeline itself, expressed as a TPL Dataflow block graph:
 //
 //      _ingestBlock (BufferBlock<PooledMessage>)
 //            |  bounded capacity = backpressure to the poll loop
@@ -168,8 +168,8 @@ public sealed class KafkaLowAllocPipelineTpl : IAsyncDisposable
     }
 
     // -----------------------------------------------------------------------
-    // 4. Poll loop: read from Kafka, copy payload into a rented buffer,
-    //    post into the ingest block. No LINQ, no intermediate collections.
+    // Poll loop: read from Kafka, copy payload into a rented buffer,
+    // post into the ingest block. No LINQ, no intermediate collections.
     // -----------------------------------------------------------------------
     private void PollLoop(CancellationToken ct)
     {
@@ -220,8 +220,8 @@ public sealed class KafkaLowAllocPipelineTpl : IAsyncDisposable
     }
 
     // -----------------------------------------------------------------------
-    // 5. Batch commit: process the typed, validated messages in a batch,
-    //    dead-letter rejects, commit offsets once per batch.
+    // Batch commit: process the typed, validated messages in a batch,
+    // dead-letter rejects, commit offsets once per batch.
     // -----------------------------------------------------------------------
     private async Task ProcessAndCommitBatchAsync(ValidatedMessage[] batch, CancellationToken ct)
     {
