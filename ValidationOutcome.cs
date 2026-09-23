@@ -1,0 +1,1 @@
+public enum ValidationOutcome { Valid, MalformedPayload, SchemaViolation }

@@ -1,8 +1,5 @@
 namespace LowAllocPipeline;
 
-// ---------------------------------------------------------------------------
-// 2. Pipeline configuration
-// ---------------------------------------------------------------------------
 public sealed class PipelineOptions
 {
     public string BootstrapServers { get; init; } = "localhost:9092";

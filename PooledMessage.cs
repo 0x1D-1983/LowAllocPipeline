@@ -2,12 +2,12 @@ using Confluent.Kafka;
 
 namespace LowAllocPipeline;
 
-// ---------------------------------------------------------------------------
-// 1. A struct-based "envelope" for in-flight messages.
-//    Using a struct avoids a heap allocation per message for the wrapper
-//    itself. The payload bytes come from ArrayPool, so we also avoid an
-//    allocation for the byte[] on every message.
-// ---------------------------------------------------------------------------
+/// <summary>
+/// A struct-based "envelope" for in-flight messages.
+/// Using a struct avoids a heap allocation per message for the wrapper
+/// itself. The payload bytes come from ArrayPool, so we also avoid an
+/// allocation for the byte[] on every message.
+/// </summary>
 public readonly struct PooledMessage
 {
     public readonly byte[] RentedBuffer;   // rented from ArrayPool<byte>.Shared
