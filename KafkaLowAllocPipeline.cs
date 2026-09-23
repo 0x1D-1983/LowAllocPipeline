@@ -5,10 +5,10 @@ using Microsoft.Extensions.ObjectPool;
 
 namespace LowAllocPipeline;
 
-public sealed class KafkaLowAllocPipeline : IAsyncDisposable
+public sealed class KafkaLowAllocPipeline : ILowAllocPipeline
 {
     private readonly PipelineOptions _opts;
-    private readonly IConsumer<Ignore, byte[]> _consumer;
+    private readonly IConsumer<Ignore, byte[]>? _consumer;
     private readonly Channel<PooledMessage> _channel;
     private readonly ArrayPool<byte> _pool = ArrayPool<byte>.Shared;
     private readonly ObjectPool<OrderEvent> _orderEventPool =
@@ -33,23 +33,30 @@ public sealed class KafkaLowAllocPipeline : IAsyncDisposable
             SingleWriter = true,
         });
  
-        var config = new ConsumerConfig
+        if (opts.EnableKafka)
         {
-            BootstrapServers = opts.BootstrapServers,
-            GroupId = opts.GroupId,
-            EnableAutoCommit = false,          // we commit manually, in batches
-            AutoOffsetReset = AutoOffsetReset.Latest,
-            FetchMinBytes = 1,
-            // Tune these for throughput vs latency tradeoffs per workload:
-            // FetchWaitMaxMs, QueuedMinMessages, etc.
-        };
- 
-        _consumer = new ConsumerBuilder<Ignore, byte[]>(config).Build();
+            var config = new ConsumerConfig
+            {
+                BootstrapServers = opts.BootstrapServers,
+                GroupId = opts.GroupId,
+                EnableAutoCommit = false,          // we commit manually, in batches
+                AutoOffsetReset = AutoOffsetReset.Latest,
+                FetchMinBytes = 1,
+                // Tune these for throughput vs latency tradeoffs per workload:
+                // FetchWaitMaxMs, QueuedMinMessages, etc.
+            };
+
+            _consumer = new ConsumerBuilder<Ignore, byte[]>(config).Build();
+        }
+
         _validator = new OrderEventValidator(_orderEventPool);
     }
 
     public void Start()
     {
+        if (_consumer is null)
+            throw new InvalidOperationException("Kafka is disabled. Use StartProcessing() and EnqueueAsync().");
+
         _consumer.Subscribe(_opts.Topic);
  
         // Poll loop runs on its own long-running task/thread. Kafka's .Consume()
@@ -57,9 +64,33 @@ public sealed class KafkaLowAllocPipeline : IAsyncDisposable
         _pollTask = Task.Factory.StartNew(
             () => PollLoop(_cts.Token),
             TaskCreationOptions.LongRunning);
- 
+
+        StartProcessing();
+    }
+
+    public void StartProcessing()
+    {
+        if (_processTask is not null)
+            return;
+
         _processTask = Task.Run(() => ProcessLoop(_cts.Token));
     }
+
+    public async ValueTask EnqueueAsync(
+        ReadOnlyMemory<byte> payload,
+        TopicPartitionOffset tpo,
+        CancellationToken ct = default)
+    {
+        var pooledMsg = RentCopy(payload.Span, tpo);
+        var writer = _channel.Writer;
+        if (!writer.TryWrite(pooledMsg))
+            await writer.WriteAsync(pooledMsg, ct);
+    }
+
+    public void CompleteIngest() => _channel.Writer.Complete();
+
+    public Task Completion =>
+        _processTask ?? throw new InvalidOperationException("Start processing before awaiting Completion.");
  
     /// <summary>
     /// Poll loop: read from Kafka, copy payload into a rented buffer,
@@ -75,7 +106,7 @@ public sealed class KafkaLowAllocPipeline : IAsyncDisposable
             ConsumeResult<Ignore, byte[]>? result;
             try
             {
-                result = _consumer.Consume(ct);
+                result = _consumer!.Consume(ct);
             }
             catch (ConsumeException ex)
             {
@@ -93,10 +124,7 @@ public sealed class KafkaLowAllocPipeline : IAsyncDisposable
                 continue;
  
             var payload = result.Message.Value;
-            var rented = _pool.Rent(payload.Length);
-            Buffer.BlockCopy(payload, 0, rented, 0, payload.Length);
- 
-            var pooledMsg = new PooledMessage(rented, payload.Length, result.TopicPartitionOffset);
+            var pooledMsg = RentCopy(payload, result.TopicPartitionOffset);
  
             // TryWrite first (cheap, non-blocking); fall back to the async
             // path only when the channel is actually full. Avoids a Task
@@ -236,7 +264,7 @@ public sealed class KafkaLowAllocPipeline : IAsyncDisposable
             foreach (var kvp in highestPerPartition)
                 offsetsToCommit.Add(new TopicPartitionOffset(kvp.Key, kvp.Value.Offset + 1));
  
-            _consumer.Commit(offsetsToCommit);
+            _consumer?.Commit(offsetsToCommit);
         }
         finally
         {
@@ -269,6 +297,13 @@ public sealed class KafkaLowAllocPipeline : IAsyncDisposable
         return Task.CompletedTask;
     }
  
+    private PooledMessage RentCopy(ReadOnlySpan<byte> payload, TopicPartitionOffset tpo)
+    {
+        var rented = _pool.Rent(payload.Length);
+        payload.CopyTo(rented);
+        return new PooledMessage(rented, payload.Length, tpo);
+    }
+
     public async ValueTask DisposeAsync()
     {
         _cts.Cancel();
@@ -278,8 +313,11 @@ public sealed class KafkaLowAllocPipeline : IAsyncDisposable
         if (_processTask is not null)
             await SafeAwait(_processTask);
  
-        _consumer.Close();
-        _consumer.Dispose();
+        if (_consumer is not null)
+        {
+            _consumer.Close();
+            _consumer.Dispose();
+        }
         _cts.Dispose();
  
         static async Task SafeAwait(Task t)

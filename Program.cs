@@ -1,26 +1,18 @@
-﻿using LowAllocPipeline;
+﻿using BenchmarkDotNet.Running;
+using LowAllocPipeline;
 
-public static class Program
+public class Program
 {
-    public static async Task Main()
+    public static void Main(string[] args)
     {
-        var pipeline = new KafkaLowAllocPipeline(new PipelineOptions
+        if (args is ["--smoke"])
         {
-            BootstrapServers = "localhost:9092",
-            GroupId = "orders-processor",
-            Topic = "orders",
-            ChannelCapacity = 20_000,
-            BatchSize = 1_000,
-            BatchLinger = TimeSpan.FromMilliseconds(25),
-        });
- 
-        pipeline.Start();
- 
-        // Keep running until shutdown signal (Ctrl+C, K8s SIGTERM, etc.)
-        var shutdown = new TaskCompletionSource();
-        Console.CancelKeyPress += (_, e) => { e.Cancel = true; shutdown.TrySetResult(); };
-        await shutdown.Task;
- 
-        await pipeline.DisposeAsync();
+            PipelineSmoke.Run();
+            return;
+        }
+
+        BenchmarkSwitcher
+            .FromAssembly(typeof(Program).Assembly)
+            .Run(args);
     }
 }

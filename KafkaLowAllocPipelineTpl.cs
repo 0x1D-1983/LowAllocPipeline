@@ -55,10 +55,10 @@ namespace LowAllocPipeline;
 //    across the chain, and a small amount of scheduling overhead per block
 //    hand-off versus the tighter hand-rolled loop.
 // ---------------------------------------------------------------------------
-public sealed class KafkaLowAllocPipelineTpl : IAsyncDisposable
+public sealed class KafkaLowAllocPipelineTpl : ILowAllocPipeline
 {
     private readonly PipelineOptions _opts;
-    private readonly IConsumer<Ignore, byte[]> _consumer;
+    private readonly IConsumer<Ignore, byte[]>? _consumer;
     private readonly ArrayPool<byte> _pool = ArrayPool<byte>.Shared;
     private readonly ObjectPool<OrderEvent> _orderEventPool =
         new DefaultObjectPool<OrderEvent>(new OrderEventPooledPolicy(), maximumRetained: 4096);
@@ -77,16 +77,20 @@ public sealed class KafkaLowAllocPipelineTpl : IAsyncDisposable
     {
         _opts = opts;
 
-        var config = new ConsumerConfig
+        if (opts.EnableKafka)
         {
-            BootstrapServers = opts.BootstrapServers,
-            GroupId = opts.GroupId,
-            EnableAutoCommit = false,          // we commit manually, in batches
-            AutoOffsetReset = AutoOffsetReset.Latest,
-            FetchMinBytes = 1,
-        };
+            var config = new ConsumerConfig
+            {
+                BootstrapServers = opts.BootstrapServers,
+                GroupId = opts.GroupId,
+                EnableAutoCommit = false,          // we commit manually, in batches
+                AutoOffsetReset = AutoOffsetReset.Latest,
+                FetchMinBytes = 1,
+            };
 
-        _consumer = new ConsumerBuilder<Ignore, byte[]>(config).Build();
+            _consumer = new ConsumerBuilder<Ignore, byte[]>(config).Build();
+        }
+
         _validator = new OrderEventValidator(_orderEventPool);
 
         // --- Stage 1: ingest. BoundedCapacity is the backpressure knob —
@@ -158,6 +162,9 @@ public sealed class KafkaLowAllocPipelineTpl : IAsyncDisposable
 
     public void Start()
     {
+        if (_consumer is null)
+            throw new InvalidOperationException("Kafka is disabled. Use StartProcessing() and EnqueueAsync().");
+
         _consumer.Subscribe(_opts.Topic);
 
         // Poll loop runs on its own long-running task/thread. Kafka's .Consume()
@@ -166,6 +173,27 @@ public sealed class KafkaLowAllocPipelineTpl : IAsyncDisposable
             () => PollLoop(_cts.Token),
             TaskCreationOptions.LongRunning);
     }
+
+    // Dataflow blocks begin executing as soon as they are constructed; there
+    // is no separate process-loop task to start. This is a no-op so the
+    // ILowAllocPipeline surface matches the hand-rolled pipeline.
+    public void StartProcessing()
+    {
+    }
+
+    public async ValueTask EnqueueAsync(
+        ReadOnlyMemory<byte> payload,
+        TopicPartitionOffset tpo,
+        CancellationToken ct = default)
+    {
+        var pooledMsg = RentCopy(payload.Span, tpo);
+        if (!_ingestBlock.Post(pooledMsg) && !await _ingestBlock.SendAsync(pooledMsg, ct))
+            throw new InvalidOperationException("Ingest block declined the message.");
+    }
+
+    public void CompleteIngest() => _ingestBlock.Complete();
+
+    public Task Completion => _commitBlock.Completion;
 
     // -----------------------------------------------------------------------
     // Poll loop: read from Kafka, copy payload into a rented buffer,
@@ -178,7 +206,7 @@ public sealed class KafkaLowAllocPipelineTpl : IAsyncDisposable
             ConsumeResult<Ignore, byte[]>? result;
             try
             {
-                result = _consumer.Consume(ct);
+                result = _consumer!.Consume(ct);
             }
             catch (ConsumeException ex)
             {
@@ -196,10 +224,7 @@ public sealed class KafkaLowAllocPipelineTpl : IAsyncDisposable
                 continue;
 
             var payload = result.Message.Value;
-            var rented = _pool.Rent(payload.Length);
-            Buffer.BlockCopy(payload, 0, rented, 0, payload.Length);
-
-            var pooledMsg = new PooledMessage(rented, payload.Length, result.TopicPartitionOffset);
+            var pooledMsg = RentCopy(payload, result.TopicPartitionOffset);
 
             // Post() first (cheap, non-blocking); fall back to the async
             // SendAsync only when the block is actually full. This is where
@@ -270,7 +295,14 @@ public sealed class KafkaLowAllocPipelineTpl : IAsyncDisposable
         foreach (var kvp in highestPerPartition)
             offsetsToCommit.Add(new TopicPartitionOffset(kvp.Key, kvp.Value.Offset + 1));
 
-        _consumer.Commit(offsetsToCommit);
+        _consumer?.Commit(offsetsToCommit);
+    }
+
+    private PooledMessage RentCopy(ReadOnlySpan<byte> payload, TopicPartitionOffset tpo)
+    {
+        var rented = _pool.Rent(payload.Length);
+        payload.CopyTo(rented);
+        return new PooledMessage(rented, payload.Length, tpo);
     }
 
     // Real per-message processing now operates on the typed, validated
@@ -308,8 +340,11 @@ public sealed class KafkaLowAllocPipelineTpl : IAsyncDisposable
         await SafeAwait(_commitBlock.Completion);
 
         await _lingerTimer.DisposeAsync();
-        _consumer.Close();
-        _consumer.Dispose();
+        if (_consumer is not null)
+        {
+            _consumer.Close();
+            _consumer.Dispose();
+        }
         _cts.Dispose();
 
         static async Task SafeAwait(Task t)

@@ -9,4 +9,10 @@ public sealed class PipelineOptions
     public int BatchSize { get; init; } = 500;
     public TimeSpan BatchLinger { get; init; } = TimeSpan.FromMilliseconds(50);
     public int MaxDegreeOfParallelism { get; init; } = Environment.ProcessorCount;
+
+    /// <summary>
+    /// When false, the pipeline does not create a Kafka consumer. Messages are
+    /// supplied via <see cref="ILowAllocPipeline.EnqueueAsync"/> (benchmarks).
+    /// </summary>
+    public bool EnableKafka { get; init; } = true;
 }
