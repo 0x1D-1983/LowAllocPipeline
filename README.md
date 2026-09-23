@@ -82,10 +82,10 @@ Results land in `BenchmarkDotNet.Artifacts/`.
 
 Sample run (Apple M5 Pro, .NET 10.0.11):
 
-| Method | Mean | Allocated |
-|---|---:|---:|
-| HandRolledChannel | 1.32 μs | 273 B |
-| TplDataflow | 1.87 μs | 356 B |
+| Method            | Mean     | Error     | StdDev    | Ratio | RatioSD | Rank | Gen0   | Gen1   | Allocated | Alloc Ratio |
+|------------------ |---------:|----------:|----------:|------:|--------:|-----:|-------:|-------:|----------:|------------:|
+| HandRolledChannel | 1.318 us | 0.0063 us | 0.0059 us |  1.00 |    0.01 |    1 | 0.0325 | 0.0100 |     273 B |        1.00 |
+| TplDataflow       | 1.870 us | 0.0370 us | 0.0908 us |  1.42 |    0.07 |    2 | 0.0425 | 0.0075 |     356 B |        1.30 |
 
 On that machine the Channel pipeline was about 1.4× faster and allocated ~30% less per message. Treat the numbers as a starting point; re-run on your hardware.
 
